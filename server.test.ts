@@ -93,3 +93,57 @@ describe('GitHub response boundaries',()=>{
     expect(githubRepo('https://github.com.evil.test/org/repo')).toBeNull();
   });
 });
+
+describe('manual refresh', () => {
+  it('rechecks a recovered lookup instead of returning a cached error', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const transport=vi.fn<Transport>().mockResolvedValueOnce({status:503,headers:{},body:''}).mockResolvedValue(ok([pr(1)]));
+    const {bb,harness}=createFakePluginHost();await seed(bb,'one',1);
+    createPlugin(transport)(bb);
+    await harness.behavior.callRpc('lookup',{environmentId:'one'});
+    vi.setSystemTime(Date.now()+31_000);
+    expect(await harness.behavior.callRpc('lookup',{environmentId:'one',refresh:true})).toMatchObject({error:null});
+    expect(transport).toHaveBeenCalledTimes(2);
+    await harness.lifecycle.dispose();
+  });
+  it('finds a newly created PR without waiting for the negative cache', async()=>{
+    vi.useFakeTimers({toFake:['Date']});
+    let created=false;
+    const transport=vi.fn<Transport>(async()=>ok(created?[pr(7)]:[]));
+    const {bb,harness}=createFakePluginHost();
+    harness.sdk.stub('environments.get',async()=>({projectId:'project',branchName:'branch-7'}));
+    harness.sdk.stub('projects.get',async()=>({gitRemoteUrl:'https://github.com/org/repo.git'}));
+    createPlugin(transport)(bb);
+    expect(await harness.behavior.callRpc('lookup',{environmentId:'new'})).toMatchObject({pull:null,error:null});
+    created=true;vi.setSystemTime(Date.now()+61_000);
+    expect(await harness.behavior.callRpc('lookup',{environmentId:'new'})).toMatchObject({pull:{number:7},error:null});
+    await harness.lifecycle.dispose();
+  });
+});
+
+describe('manual refresh safeguards',()=>{
+  it('keeps the rate-limit cooldown even when Refresh is requested',async()=>{
+    vi.useFakeTimers({toFake:['Date']});
+    const transport=vi.fn<Transport>(async()=>({status:429,headers:{'retry-after':'120'},body:''}));
+    const {bb,harness}=createFakePluginHost();await seed(bb,'one',1);
+    createPlugin(transport)(bb);
+    await harness.behavior.callRpc('lookup',{environmentId:'one'});
+    vi.setSystemTime(Date.now()+31_000);
+    expect(await harness.behavior.callRpc('lookup',{environmentId:'one',refresh:true})).toMatchObject({retryAt:expect.any(Number)});
+    expect(transport).toHaveBeenCalledTimes(1);
+    await harness.lifecycle.dispose();
+  });
+  it('coalesces repeated manual refreshes and revalidates after 30 seconds',async()=>{
+    vi.useFakeTimers({toFake:['Date']});
+    const transport=vi.fn<Transport>(async()=>ok([pr(1)]));
+    const {bb,harness}=createFakePluginHost();await seed(bb,'one',1);
+    createPlugin(transport)(bb);
+    await harness.behavior.callRpc('lookup',{environmentId:'one'});
+    await Promise.all([1,2,3].map(()=>harness.behavior.callRpc('lookup',{environmentId:'one',refresh:true})));
+    expect(transport).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(Date.now()+31_000);
+    await harness.behavior.callRpc('lookup',{environmentId:'one',refresh:true});
+    expect(transport).toHaveBeenCalledTimes(2);
+    await harness.lifecycle.dispose();
+  });
+});

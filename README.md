@@ -59,7 +59,7 @@ If this plugin is already installed from a local directory, keep that installati
 2. Read each PR’s state and the merged count.
 3. Click a PR number to open it on GitHub.
 4. Expand **Child PRs** for titles, state details, and child-thread links.
-5. Click **Refresh** after changes on GitHub, or wait for the next automatic refresh.
+5. Click **Refresh** after changes on GitHub, or wait for the next automatic refresh. The row shows **Last checked**; expand a stale PR to read its lookup error.
 
 The row is hidden on threads without children. It also stays out of new-thread, queued-message, and side-chat composers.
 
@@ -67,13 +67,13 @@ The row is hidden on threads without children. It also stays out of new-thread, 
 
 Automatic refresh runs every **60 seconds** while the page is visible. Returning to a visible page also triggers a refresh. Each row performs at most **four environment lookups concurrently**.
 
-The server uses `gh api` with GitHub’s REST API. It fetches the 100 most recently updated PRs once per repository and shares that response across child environments and open browser tabs. Repository results cache for **60 seconds**. Older PRs use a targeted lookup by saved PR number or branch. Absent branch lookups cache for **15 minutes**; ordinary errors cache for **5 minutes**. Manual Refresh respects these caches.
+The server uses `gh api` with GitHub’s REST API. It fetches the 100 most recently updated PRs once per repository and shares that response across child environments and open browser tabs. Repository results cache for **60 seconds**. Older PRs use a targeted lookup by saved PR number or branch. Each environment checks for new PRs every **60 seconds**. Targeted branch searches outside the recent repository page cache for **15 minutes**; ordinary errors cache for **5 minutes** during automatic refresh. Manual Refresh rechecks errors and results after a **30-second** minimum shared cache, while always respecting GitHub cooldowns.
 
 ETags persist across reloads. After the cache expires, requests include `If-None-Match`; HTTP 304 reuses the saved response. GitHub documents that authenticated conditional requests returning 304 do not count toward the primary rate limit. Other traffic and secondary limits still apply.
 
 If GitHub returns a REST rate limit, the plugin shares a persistent cooldown across all lookups. It honors `Retry-After` or the primary-limit reset header, with a five-minute fallback when neither provides a reset time. The row displays the retry time. GitHub CLI does not remove API limits.
 
-For six known PRs present in one repository response, an actively viewed row needs at most **60 repository requests per hour**, before conditional-response savings, plus any targeted discovery requests. Additional browser tabs share the same server cache.
+For six known PRs present in one repository response, automatic refresh needs at most **60 repository requests per hour**, before conditional-response savings, plus any targeted discovery requests. Additional browser tabs share the same server cache. Manual Refresh can revalidate at most once per 30 seconds.
 
 [GitHub API best practices](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api)
 
@@ -143,7 +143,7 @@ bb plugin dev
 
 ### Validation
 
-The initial implementation passed TypeScript checks, 12 automated tests, and a BB plugin build. Live browser checks covered a parent with six PRs, refresh, expanded details, child navigation, light/dark themes, and a narrow viewport.
+The current version passes TypeScript checks, 16 automated tests, and a BB plugin build. Live browser checks covered a parent with six PRs, refresh, expanded details, child navigation, light/dark themes, and a narrow viewport.
 
 When contributing, run the commands above and verify the affected behavior in BB. Keep GitHub access on the server, use public BB SDK APIs, and distinguish unavailable status from an absent PR.
 

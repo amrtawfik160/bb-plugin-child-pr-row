@@ -75,7 +75,7 @@ export function githubClient(bb: BbPluginApi, transport: Transport = ghTransport
       await bb.storage.kv.set('rest-rate-limit-until', until);
       throw new GithubError('GitHub REST rate limit reached. Lookups are paused.', until);
     }
-    if (status !== 200) throw new GithubError(`GitHub returned HTTP ${status}. Check repository access on the BB server.`);
+    if (status !== 200) throw new GithubError(status >= 500 ? `GitHub is temporarily unavailable (HTTP ${status}). Retry with Refresh.` : `GitHub returned HTTP ${status}. Check repository access on the BB server.`);
     const body = JSON.parse(response.body);
     const pulls = z.array(restPull).parse(Array.isArray(body) ? body : [body]);
     await bb.storage.kv.set(`rest:${endpoint}`, { pulls, etag: headers.etag ?? null, at: Date.now() });
@@ -91,14 +91,15 @@ export function githubClient(bb: BbPluginApi, transport: Transport = ghTransport
     return result;
   }
   return {
-    async find(repo: string, branch: string | null, number?: number): Promise<RestPull | null> {
-      const pulls = await cachedRequest(`repos/${repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`);
+    async find(repo: string, branch: string | null, number?: number, refresh = false): Promise<RestPull | null> {
+      const ttl = refresh ? 30_000 : minute;
+      const pulls = await cachedRequest(`repos/${repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`, ttl);
       const found = number ? pulls.find(pull => pull.number === number) : pulls.find(pull => pull.head.ref === branch && pull.state === 'open') ?? pulls.find(pull => pull.head.ref === branch);
       if (found) return found;
-      if (number) return (await cachedRequest(`repos/${repo}/pulls/${number}`))[0] ?? null;
+      if (number) return (await cachedRequest(`repos/${repo}/pulls/${number}`, ttl))[0] ?? null;
       if (!branch) return null;
       const head = encodeURIComponent(`${repo.split('/')[0]}:${branch}`);
-      const matches = await cachedRequest(`repos/${repo}/pulls?state=all&head=${head}&per_page=100`, 15 * minute);
+      const matches = await cachedRequest(`repos/${repo}/pulls?state=all&head=${head}&per_page=100`, refresh ? 30_000 : 15 * minute);
       return matches.find(pull => pull.state === 'open') ?? matches[0] ?? null;
     },
   };

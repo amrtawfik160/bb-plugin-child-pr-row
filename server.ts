@@ -11,7 +11,7 @@ const resultSchema = z.object({
 });
 export const contract = defineRpcContract({
   lookup: {
-    input: z.object({ environmentId: z.string().min(1) }),
+    input: z.object({ environmentId: z.string().min(1), refresh: z.boolean().optional() }),
     output: resultSchema,
   },
 });
@@ -26,21 +26,21 @@ export function createPlugin(transport?: Transport) {
     const minute = 60_000;
     function ttl(value: Lookup) {
       if (value.error) return 5 * minute;
-      if (!value.pull) return 15 * minute;
+      if (!value.pull) return minute;
       return minute;
     }
-    async function lookup(environmentId: string): Promise<Lookup> {
+    async function lookup(environmentId: string, refresh = false): Promise<Lookup> {
       const saved = resultSchema.safeParse(await bb.storage.kv.get<unknown>(`pull:${environmentId}`));
       const previous = saved.success ? saved.data : { pull: null, error: null, checkedAt: 0 };
       const now = Date.now();
       const attempt = await bb.storage.kv.get<{ at: number; result: Lookup }>(`rest-attempt:${environmentId}`);
-      if (attempt && (!attempt.result.retryAt || attempt.result.retryAt > now) && now - attempt.at < ttl(attempt.result)) return attempt.result;
+      if (attempt && (!attempt.result.retryAt || attempt.result.retryAt > now) && now - attempt.at < (refresh ? 30_000 : ttl(attempt.result))) return attempt.result;
       let value: Lookup;
       try {
         const identity = pullIdentity(previous.pull?.url);
         let pull;
         if (identity) {
-          pull = await github.find(identity.repo, null, identity.number);
+          pull = await github.find(identity.repo, null, identity.number, refresh);
         } else {
           const environment = await bb.sdk.environments.get({ environmentId });
           const project = await bb.sdk.projects.get({ projectId: environment.projectId });
@@ -50,7 +50,7 @@ export function createPlugin(transport?: Transport) {
             await bb.storage.kv.set(`rest-attempt:${environmentId}`, { at: Date.now(), result: value });
             return value;
           }
-          pull = await github.find(repo, environment.branchName);
+          pull = await github.find(repo, environment.branchName, undefined, refresh);
         }
         value = { pull: pull ? toPull(pull) : null, error: null, checkedAt: Date.now() };
         if (!value.pull && previous.pull) {
@@ -66,11 +66,11 @@ export function createPlugin(transport?: Transport) {
       return value;
     }
     bb.rpc.register(contract, {
-      lookup({ environmentId }) {
+      lookup({ environmentId, refresh }) {
         const inFlight = pending.get(environmentId);
         if (inFlight) return inFlight;
         // Serialize environments so the first rate limit stops the rest of the batch.
-        const request = queue.then(() => lookup(environmentId));
+        const request = queue.then(() => lookup(environmentId, refresh));
         queue = request.catch(() => undefined);
         pending.set(environmentId, request);
         void request.finally(() => pending.delete(environmentId)).catch(() => undefined);
