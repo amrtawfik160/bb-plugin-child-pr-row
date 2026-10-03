@@ -1,0 +1,90 @@
+import { useEffect, useMemo, useState } from 'react';
+import { definePluginApp, useComposerView, experimental_useSidebarThreads, useRpc, UrlLink } from '@get-bb/plugin-sdk/app';
+import type { contract, Lookup } from './server';
+import { descendants, groupPulls, type Child } from './model';
+import './style.css';
+
+const labels = { open: 'Open', draft: 'Draft', merged: 'Merged', closed: 'Closed' };
+
+function Pulls({ children }: { children: Child[] }) {
+  const rpc = useRpc<typeof contract>();
+  const [results, setResults] = useState<Record<string, Lookup>>({});
+  const [refresh, setRefresh] = useState(0);
+  const [busy, setBusy] = useState(true);
+  const [expanded, setExpanded] = useState(false);
+  const environments = [...new Set(children.flatMap(child => child.environment ? [child.environment.id] : []))].sort().join(',');
+  useEffect(() => {
+    let cancelled = false;
+    let running = false;
+    const ids = environments ? environments.split(',') : [];
+    async function update() {
+      if (running || document.hidden) return;
+      running = true;
+      setBusy(true);
+      let index = 0;
+      await Promise.all(Array.from({ length: Math.min(4, ids.length) }, async () => {
+        while (!cancelled && index < ids.length) {
+          const environmentId = ids[index++];
+          try {
+            const value = await rpc.call('lookup', { environmentId });
+            if (!cancelled) setResults(current => ({ ...current, [environmentId]: value }));
+          } catch {
+            if (!cancelled) setResults(current => ({ ...current, [environmentId]: {
+              pull: current[environmentId]?.pull ?? null,
+              checkedAt: current[environmentId]?.checkedAt ?? 0,
+              error: 'PR lookup failed. Retry with Refresh.',
+            } }));
+          }
+        }
+      }));
+      running = false;
+      if (!cancelled) setBusy(false);
+    }
+    void update();
+    const timer = window.setInterval(() => void update(), 60_000);
+    const onVisible = () => { if (!document.hidden) void update(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { cancelled = true; clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
+  }, [environments, refresh, rpc]);
+
+  const rows = groupPulls(children, results);
+  const unresolved = children.filter(child => child.environment && results[child.environment.id]?.error);
+  const merged = rows.filter(row => row.pull.state === 'merged' && !row.stale).length;
+  return <section className="child-pr-row" aria-label="Child pull requests">
+    <div className="child-pr-strip">
+      <button type="button" className="child-pr-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+        Child PRs{rows.length > 0 ? ` · ${merged}/${rows.length} merged` : ''} <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+      </button>
+      <div className="child-pr-links" aria-label="Pull requests">
+        {rows.map(({ pull, stale }) => <UrlLink key={pull.url} href={pull.url} className={`child-pr-link child-pr-${pull.state}`} title={`${pull.title}\n${pull.attention.replaceAll('_', ' ')}${stale ? '\nLast known status. Refresh failed.' : ''}`}>
+          <span>#{pull.number}</span><span>{labels[pull.state]}{stale ? ' · stale' : ''}</span>
+        </UrlLink>)}
+        {!rows.length && <span className="child-pr-muted">{busy ? 'Checking child PRs…' : unresolved.length ? 'PR status unavailable' : 'No linked PRs yet'}</span>}
+      </div>
+      <button type="button" className="child-pr-refresh" disabled={busy} onClick={() => setRefresh(value => value + 1)}>{busy ? 'Checking…' : 'Refresh'}</button>
+    </div>
+    {unresolved.length > 0 && <p className="child-pr-warning" role="status">Could not refresh {unresolved.length} child {unresolved.length === 1 ? 'thread' : 'threads'}. Open details or retry with Refresh.</p>}
+    {expanded && <div className="child-pr-details">
+      {rows.map(({ pull, children: linked, stale }) => <div className="child-pr-detail" key={pull.url}>
+        <UrlLink href={pull.url}>#{pull.number} {pull.title}</UrlLink>
+        <span className="child-pr-muted">{labels[pull.state]}{stale ? ' · last known status' : ''} · {pull.attention.replaceAll('_', ' ')}</span>
+        <div className="child-pr-threads">{linked.map(child => <a key={child.id} href={child.href}>{child.displayTitle}</a>)}</div>
+      </div>)}
+      {children.filter(child => !child.environment || !results[child.environment.id]?.pull).map(child => <div className="child-pr-detail" key={child.id}>
+        <a href={child.href}>{child.displayTitle}</a>
+        <span className="child-pr-muted">{!child.environment ? 'No environment' : results[child.environment.id]?.error ?? (busy && !results[child.environment.id] ? 'Checking…' : 'No linked PR')}</span>
+      </div>)}
+    </div>}
+  </section>;
+}
+function ChildPullRequests() {
+  const { scope } = useComposerView();
+  const { threads } = experimental_useSidebarThreads();
+  const threadId = scope.kind === 'thread' ? scope.threadId : null;
+  const children = useMemo(() => threadId ? descendants(threads.map(thread => ({ ...thread, environment: thread.environment?.id ? { id: thread.environment.id } : null })), threadId) : [], [threads, threadId]);
+  if (!threadId || !children.length) return null;
+  return <Pulls key={threadId} children={children} />;
+}
+export default definePluginApp(app => {
+  app.composer.customize({ id: 'child-pull-requests', scopes: ['thread'], banners: [{ id: 'row', chrome: 'bare', component: ChildPullRequests }] });
+});
