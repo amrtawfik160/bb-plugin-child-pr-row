@@ -14,6 +14,6 @@ Click a PR to manage it on GitHub. The plugin does not modify or merge PRs.
 
 Requires BB 0.44 or later, Plugin SDK 0.5.29 or later, and GitHub access through BB’s existing PR lookup. Children need Git environments associated with their PR branches. PR URLs mentioned only in chat are not discovered.
 
-Automatic refresh runs every 60 seconds. The server caches lookups for 30 seconds, including manual refresh requests. Last successful results are saved in BB’s plugin storage.
+Automatic refresh runs every 60 seconds. GitHub lookups are serialized and cached for 5–60 minutes. A rate-limit error pauses plugin lookups for 60 minutes and displays a retry time. Last successful results are saved in BB’s plugin storage.
 
 [Installation and development](https://github.com/amrtawfik160/bb-plugin-child-pr-row)

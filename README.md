@@ -67,7 +67,9 @@ The row is hidden on threads without children. It also stays out of new-thread, 
 
 Automatic refresh runs every **60 seconds** while the page is visible. Returning to a visible page also triggers a refresh. Each row performs at most **four environment lookups concurrently**.
 
-The server combines concurrent requests for the same environment and caches results for **30 seconds**. Manual Refresh uses this cache too, so a recent GitHub change may take another refresh to appear.
+The server combines requests for the same environment and serializes GitHub lookups across all rows. Results persist across plugin reloads: open and draft PRs cache for **5 minutes**, absent PRs for **15 minutes**, and merged or closed PRs for **60 minutes**. Other lookup failures cache for **5 minutes**. Manual Refresh respects these limits.
+
+After a GitHub rate-limit error, all plugin lookups pause for **60 minutes**. The shared cooldown survives reloads. The row displays the automatic retry time and disables Refresh during the pause. The plugin cannot reset GitHub’s quota, and other BB features may still consume that quota.
 
 The last successful result is saved in BB’s plugin storage. If a lookup fails, or a previously known branch no longer resolves, the PR remains visible with a **stale** label. Open the PR on GitHub to verify its current state.
 
@@ -134,7 +136,7 @@ bb plugin dev
 
 ### Validation
 
-The initial implementation passed TypeScript checks, five automated tests, and a BB plugin build. Live browser checks covered a parent with six PRs, refresh, expanded details, child navigation, light/dark themes, and a narrow viewport.
+The initial implementation passed TypeScript checks, nine automated tests, and a BB plugin build. Live browser checks covered a parent with six PRs, refresh, expanded details, child navigation, light/dark themes, and a narrow viewport.
 
 When contributing, run the commands above and verify the affected behavior in BB. Keep GitHub access on the server, use public BB SDK APIs, and distinguish unavailable status from an absent PR.
 

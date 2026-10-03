@@ -49,6 +49,8 @@ function Pulls({ children }: { children: Child[] }) {
 
   const rows = groupPulls(children, results);
   const unresolved = children.filter(child => child.environment && results[child.environment.id]?.error);
+  const retryAt = Math.max(0, ...Object.values(results).map(result => result.retryAt ?? 0));
+  const paused = retryAt > Date.now();
   const merged = rows.filter(row => row.pull.state === 'merged' && !row.stale).length;
   return <section className="child-pr-row" aria-label="Child pull requests">
     <div className="child-pr-strip">
@@ -61,9 +63,10 @@ function Pulls({ children }: { children: Child[] }) {
         </UrlLink>)}
         {!rows.length && <span className="child-pr-muted">{busy ? 'Checking child PRs…' : unresolved.length ? 'PR status unavailable' : 'No linked PRs yet'}</span>}
       </div>
-      <button type="button" className="child-pr-refresh" disabled={busy} onClick={() => setRefresh(value => value + 1)}>{busy ? 'Checking…' : 'Refresh'}</button>
+      <button type="button" className="child-pr-refresh" disabled={busy || paused} onClick={() => setRefresh(value => value + 1)}>{paused ? 'Paused' : busy ? 'Checking…' : 'Refresh'}</button>
     </div>
-    {unresolved.length > 0 && <p className="child-pr-warning" role="status">Could not refresh {unresolved.length} child {unresolved.length === 1 ? 'thread' : 'threads'}. Open details or retry with Refresh.</p>}
+    {paused && <p className="child-pr-warning" role="status">GitHub rate limit reached. Saved statuses shown. Automatic retry after {new Date(retryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.</p>}
+    {!paused && unresolved.length > 0 && <p className="child-pr-warning" role="status">Could not refresh {unresolved.length} child {unresolved.length === 1 ? 'thread' : 'threads'}. Open details or retry with Refresh.</p>}
     {expanded && <div className="child-pr-details">
       {rows.map(({ pull, children: linked, stale }) => <div className="child-pr-detail" key={pull.url}>
         <UrlLink href={pull.url}>#{pull.number} {pull.title}</UrlLink>
