@@ -1,85 +1,95 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createFakePluginHost } from '@get-bb/plugin-sdk/testing';
-import plugin from './server';
-describe('PR lookup failures', () => {
-  it('distinguishes absent PRs from lookup failures', async () => {
-    const { bb, harness } = createFakePluginHost({ sdk: { environments: { pullRequest: async ({ environmentId }) => environmentId === 'empty' ? { outcome: 'absent' } : { outcome: 'unavailable', message: 'Host offline' } } } });
-    plugin(bb);
-    expect(await harness.behavior.callRpc('lookup', { environmentId: 'empty' })).toMatchObject({ pull: null, error: null });
-    expect(await harness.behavior.callRpc('lookup', { environmentId: 'offline' })).toMatchObject({ pull: null, error: 'Host offline' });
+import { createPlugin } from './server';
+import { githubClient, githubRepo, parseHttp, toPull, type RestPull, type Transport } from './github';
+const pr = (number: number, merged_at: string | null = null): RestPull => ({ number, title: `PR ${number}`, html_url: `https://github.com/org/repo/pull/${number}`, state: merged_at ? 'closed' : 'open', merged_at, head: { ref: `branch-${number}` } });
+const ok = (pulls: RestPull[], etag = '"v1"') => ({ status: 200, headers: { etag }, body: JSON.stringify(pulls) });
+async function seed(bb: ReturnType<typeof createFakePluginHost>['bb'], id: string, number: number) {
+  await bb.storage.kv.set(`pull:${id}`, { pull: toPull(pr(number)), checkedAt: 1, error: null });
+}
+afterEach(() => vi.useRealTimers());
+describe('shared GitHub REST lookup', () => {
+  it('uses one repository request for six environments and refreshes merged state', async () => {
+    const transport = vi.fn<Transport>(async () => ok([1,2,3,4,5,6].map(n => pr(n, n === 1 ? '2026-10-03T00:00:00Z' : null))));
+    const { bb, harness } = createFakePluginHost();
+    for (let n=1;n<=6;n++) await seed(bb, `env-${n}`, n);
+    createPlugin(transport)(bb);
+    const rows = await Promise.all([1,2,3,4,5,6].map(n => harness.behavior.callRpc('lookup', { environmentId: `env-${n}` })));
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(rows[0]).toMatchObject({ pull: { state: 'merged' }, error: null });
+    expect(harness.inspection.sdk.callsTo('environments.pullRequest')).toHaveLength(0);
     await harness.lifecycle.dispose();
   });
-  it('retains persisted PR status with an explicit error when a branch cannot be resolved', async () => {
-    const { bb, harness } = createFakePluginHost({ sdk: { environments: { pullRequest: async () => ({ outcome: 'absent' }) } } });
-    await bb.storage.kv.set('pull:removed', { pull: { number: 9, title: 'Saved', url: 'https://github.com/org/repo/pull/9', state: 'merged', attention: 'merged' }, checkedAt: 100, error: null });
-    plugin(bb);
-    expect(await harness.behavior.callRpc('lookup', { environmentId: 'removed' })).toMatchObject({ pull: { number: 9, state: 'merged' }, checkedAt: 100, error: expect.stringContaining('Branch no longer resolves') });
-    await harness.lifecycle.dispose();
-  });
-});
-
-describe('rate limit protection', () => {
-  it('stops lookups across environments and plugin reloads after a rate limit', async () => {
-    let calls = 0;
-    const { bb, harness } = createFakePluginHost({ sdk: { environments: { pullRequest: async () => {
-      calls++;
-      return { outcome: 'unavailable', message: 'GraphQL: API rate limit already exceeded for user ID 123.' };
-    } } } });
-    plugin(bb);
-    const first = await harness.behavior.callRpc('lookup', { environmentId: 'one' });
-    await harness.behavior.callRpc('lookup', { environmentId: 'two' });
-    const reloaded = await harness.lifecycle.reload(plugin);
-    await reloaded.harness.behavior.callRpc('lookup', { environmentId: 'three' });
-    expect(calls).toBe(1);
-    expect(first).toMatchObject({ retryAt: expect.any(Number), error: expect.stringContaining('rate limit') });
+  it('uses ETags after reload and reuses the body on HTTP 304', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const transport = vi.fn<Transport>().mockResolvedValueOnce(ok([pr(1)])).mockResolvedValueOnce({ status:304, headers:{}, body:'' });
+    const { bb, harness } = createFakePluginHost();
+    await seed(bb, 'one', 1);
+    const factory=createPlugin(transport);factory(bb);
+    await harness.behavior.callRpc('lookup', { environmentId:'one' });
+    vi.setSystemTime(Date.now()+61_000);
+    const reloaded=await harness.lifecycle.reload(factory);
+    expect(await reloaded.harness.behavior.callRpc('lookup', { environmentId:'one' })).toMatchObject({pull:{number:1},error:null});
+    expect(transport.mock.calls[1][1]).toBe('"v1"');
     await reloaded.harness.lifecycle.dispose();
   });
-  it('shares a rate limit across concurrent requests', async () => {
-    let calls = 0;
-    const { bb, harness } = createFakePluginHost({ sdk: { environments: { pullRequest: async () => {
-      calls++;
-      return { outcome: 'unavailable', message: 'API rate limit exceeded' };
-    } } } });
-    plugin(bb);
-    await Promise.all(['one', 'two', 'three', 'four'].map(environmentId => harness.behavior.callRpc('lookup', { environmentId })));
-    expect(calls).toBe(1);
+  it('honors retry-after across environments and resumes when it expires', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const transport=vi.fn<Transport>().mockResolvedValueOnce({status:429,headers:{'retry-after':'120'},body:''}).mockResolvedValue(ok([pr(1),pr(2)]));
+    const {bb,harness}=createFakePluginHost();
+    await seed(bb,'one',1);await seed(bb,'two',2);
+    createPlugin(transport)(bb);
+    const first=await harness.behavior.callRpc('lookup',{environmentId:'one'});
+    await harness.behavior.callRpc('lookup',{environmentId:'two'});
+    expect(first).toMatchObject({pull:{number:1},retryAt:Date.now()+120_000});
+    expect(transport).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(Date.now()+121_000);
+    expect(await harness.behavior.callRpc('lookup',{environmentId:'one'})).toMatchObject({error:null});
+    expect(transport).toHaveBeenCalledTimes(2);
     await harness.lifecycle.dispose();
   });
-});
-
-
-describe('lookup caching and recovery', () => {
-  it('reuses absent lookups for 15 minutes and resumes after expiry', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    let calls = 0;
-    const { bb, harness } = createFakePluginHost({ sdk: { environments: { pullRequest: async () => { calls++; return { outcome: 'absent' }; } } } });
-    plugin(bb);
-    try {
-      await harness.behavior.callRpc('lookup', { environmentId: 'empty' });
-      vi.setSystemTime(Date.now() + 60_000);
-      await harness.behavior.callRpc('lookup', { environmentId: 'empty' });
-      expect(calls).toBe(1);
-      vi.setSystemTime(Date.now() + 15 * 60_000);
-      await harness.behavior.callRpc('lookup', { environmentId: 'empty' });
-      expect(calls).toBe(2);
-    } finally { vi.useRealTimers(); await harness.lifecycle.dispose(); }
+  it('does not turn access failures into missing PRs', async () => {
+    const {bb,harness}=createFakePluginHost();await seed(bb,'one',1);
+    createPlugin(async()=>({status:404,headers:{},body:''}))(bb);
+    expect(await harness.behavior.callRpc('lookup',{environmentId:'one'})).toMatchObject({pull:{number:1},error:expect.stringContaining('404')});
+    await harness.lifecycle.dispose();
   });
-  it('resumes once the cooldown expires without extending it on cache reads', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    let calls = 0;
-    const { bb, harness } = createFakePluginHost({ sdk: { environments: { pullRequest: async () => {
-      calls++;
-      return calls === 1 ? { outcome: 'unavailable', message: 'API rate limit exceeded' } : { outcome: 'absent' };
-    } } } });
-    plugin(bb);
-    try {
-      await harness.behavior.callRpc('lookup', { environmentId: 'one' });
-      vi.setSystemTime(Date.now() + 30 * 60_000);
-      await harness.behavior.callRpc('lookup', { environmentId: 'two' });
-      expect(calls).toBe(1);
-      vi.setSystemTime(Date.now() + 31 * 60_000);
-      expect(await harness.behavior.callRpc('lookup', { environmentId: 'one' })).toMatchObject({ error: null });
-      expect(calls).toBe(2);
-    } finally { vi.useRealTimers(); await harness.lifecycle.dispose(); }
+  it('finds older PRs outside the repository page by number or branch', async () => {
+    const transport=vi.fn<Transport>(async endpoint=>endpoint.includes('sort=updated') ? ok([]) : ok([pr(7)]));
+    const {bb,harness}=createFakePluginHost();const client=githubClient(bb,transport);
+    expect((await client.find('org/repo',null,7))?.number).toBe(7);
+    expect((await client.find('org/repo','branch-7'))?.number).toBe(7);
+    expect(transport.mock.calls.map(call=>call[0])).toEqual([
+      'repos/org/repo/pulls?state=all&sort=updated&direction=desc&per_page=100',
+      'repos/org/repo/pulls/7',
+      'repos/org/repo/pulls?state=all&head=org%3Abranch-7&per_page=100',
+    ]);
+    await harness.lifecycle.dispose();
+  });
+  it('retains the shared cooldown across reloads', async()=>{
+    const transport=vi.fn<Transport>(async()=>({status:403,headers:{'x-ratelimit-remaining':'0','x-ratelimit-reset':String(Math.ceil(Date.now()/1000)+600)},body:''}));
+    const {bb,harness}=createFakePluginHost();await seed(bb,'one',1);await seed(bb,'two',2);
+    const factory=createPlugin(transport);factory(bb);
+    await harness.behavior.callRpc('lookup',{environmentId:'one'});
+    const reloaded=await harness.lifecycle.reload(factory);
+    await reloaded.harness.behavior.callRpc('lookup',{environmentId:'two'});
+    expect(transport).toHaveBeenCalledTimes(1);
+    await reloaded.harness.lifecycle.dispose();
+  });
+});
+describe('GitHub response boundaries',()=>{
+  it('distinguishes draft, closed and merged',()=>{
+    expect(toPull({...pr(1),draft:true}).state).toBe('draft');
+    expect(toPull({...pr(1),state:'closed'}).state).toBe('closed');
+    expect(toPull(pr(1,'2026-10-03T00:00:00Z')).state).toBe('merged');
+  });
+  it('parses HTTP headers without treating GitHub errors as successes',()=>{
+    expect(parseHttp('HTTP/2.0 304 Not Modified\r\nETag: "v1"\r\n\r\n')).toEqual({status:304,headers:{etag:'"v1"'},body:''});
+    expect(()=>parseHttp('login required')).toThrow();
+  });
+  it('accepts GitHub remotes and rejects unrelated hosts',()=>{
+    expect(githubRepo('git@github.com:org/repo.git')).toBe('org/repo');
+    expect(githubRepo('https://github.com/org/repo.git')).toBe('org/repo');
+    expect(githubRepo('https://github.com.evil.test/org/repo')).toBeNull();
   });
 });
