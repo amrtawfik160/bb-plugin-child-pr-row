@@ -14,6 +14,6 @@ Click a PR to manage it on GitHub. The plugin does not modify or merge PRs.
 
 Requires BB 0.44 or later, Plugin SDK 0.5.29 or later, and an authenticated GitHub CLI on the BB server. Children need Git environments associated with their PR branches. PR URLs mentioned only in chat are not discovered.
 
-Automatic refresh runs every 60 seconds. Child threads share one REST response per repository, cached for 60 seconds. Conditional requests reuse unchanged data. Rate-limit errors pause lookups until the retry time from GitHub’s headers. Last successful results are saved in BB’s plugin storage.
+Automatic refresh runs every 60 seconds. Child threads share one REST response per repository, refreshed every 2 minutes or less often when many repositories are active. All lookups stay within 200 GitHub REST requests per hour on the BB server. Conditional requests reuse unchanged data. Lookups pause on GitHub rate limits and when the account has fewer than 1,000 REST requests left. Last successful results are saved in BB’s plugin storage.
 
 [Installation and development](https://github.com/amrtawfik160/bb-plugin-child-pr-row)

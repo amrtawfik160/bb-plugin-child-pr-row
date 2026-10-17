@@ -68,10 +68,10 @@ function Pulls({ children }: { children: Child[] }) {
         </UrlLink>)}
         {!rows.length && <span className="child-pr-muted">{busy ? 'Checking child PRs…' : unresolved.length ? 'PR status unavailable' : 'No linked PRs yet'}</span>}
       </div>
-      <button type="button" className="child-pr-refresh" title="Recheck PRs. Requests within 30 seconds are shared; GitHub cooldowns still apply." disabled={busy || paused} onClick={() => setRefresh(value => value + 1)}>{paused ? 'Paused' : busy ? 'Checking…' : 'Refresh'}</button>
+      <button type="button" className="child-pr-refresh" title="Recheck PRs. Requests within 30 seconds are shared; the hourly GitHub budget and cooldowns still apply." disabled={busy || paused} onClick={() => setRefresh(value => value + 1)}>{paused ? 'Paused' : busy ? 'Checking…' : 'Refresh'}</button>
     </div>
     {checkedAt > 0 && <p className="child-pr-warning">Last checked {new Date(checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}{busy ? ' · Updating…' : ''}</p>}
-    {paused && <p className="child-pr-warning" role="status">GitHub rate limit reached. Saved statuses shown. Automatic retry after {new Date(retryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.</p>}
+    {paused && <p className="child-pr-warning" role="status">GitHub lookups paused to protect the API quota. Saved statuses shown. Automatic retry after {new Date(retryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.</p>}
     {!paused && unresolved.length > 0 && <p className="child-pr-warning" role="status">Could not refresh {unresolved.length} child {unresolved.length === 1 ? 'thread' : 'threads'}. Open details or retry with Refresh.</p>}
     {expanded && <div className="child-pr-details">
       {rows.map(({ pull, children: linked, stale }) => <div className="child-pr-detail" key={pull.url}>

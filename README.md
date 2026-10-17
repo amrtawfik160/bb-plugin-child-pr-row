@@ -67,13 +67,17 @@ The row is hidden on threads without children. It also stays out of new-thread, 
 
 Automatic refresh runs every **60 seconds** while the page is visible. Returning to a visible page also triggers a refresh. Each row performs at most **four environment lookups concurrently**.
 
-The server uses `gh api` with GitHub’s REST API. It fetches the 100 most recently updated PRs once per repository and shares that response across child environments and open browser tabs. Repository results cache for **60 seconds**. Older PRs use a targeted lookup by saved PR number or branch. Each environment checks for new PRs every **60 seconds**. Targeted branch searches outside the recent repository page cache for **15 minutes**; ordinary errors cache for **5 minutes** during automatic refresh. Manual Refresh rechecks errors and results after a **30-second** minimum shared cache, while always respecting GitHub cooldowns.
+The server uses `gh api` with GitHub’s REST API. It makes no GraphQL calls. It fetches the 100 most recently updated PRs once per repository and shares that page across every child environment and open browser tab. Repository pages refresh every **2 minutes**. With many active repositories the interval grows so that repository pages total about **120 requests per hour**. For example, 20 repositories refresh every 10 minutes.
 
-ETags persist across reloads. After the cache expires, requests include `If-None-Match`; HTTP 304 reuses the saved response. GitHub documents that authenticated conditional requests returning 304 do not count toward the primary rate limit. Other traffic and secondary limits still apply.
+GitHub sorts that page by last update. A PR or branch missing from the page has not changed since the plugin last checked it, so known older PRs and branches without PRs cost no extra request. A targeted lookup by PR number or branch runs only for a first discovery or when a busy repository pushes more than 100 PRs past the saved result. Targeted results cache for **15 minutes**. Merged rows recheck every **30 minutes**, closed rows every **10 minutes**, and errors every **5 minutes** during automatic refresh. Archived threads are not shown or checked.
 
-If GitHub returns a REST rate limit, the plugin shares a persistent cooldown across all lookups. It honors `Retry-After` or the primary-limit reset header, with a five-minute fallback when neither provides a reset time. The row displays the retry time. GitHub CLI does not remove API limits.
+All lookups share a hard budget of **200 REST requests in any rolling hour** on the BB server. After **150** requests in the last hour, only paced repository refreshes may run; Manual Refresh and new discovery wait. When the budget is used up, the row shows saved results with their real **Last checked** time.
 
-For six known PRs present in one repository response, automatic refresh needs at most **60 repository requests per hour**, before conditional-response savings, plus any targeted discovery requests. Additional browser tabs share the same server cache. Manual Refresh can revalidate at most once per 30 seconds.
+ETags persist across reloads. After the cache expires, requests include `If-None-Match`; HTTP 304 reuses the saved response. GitHub documents that authenticated conditional requests returning 304 do not count toward the primary rate limit. A live check on 17 October 2026 confirmed that a 304 left `X-RateLimit-Used` unchanged.
+
+If GitHub returns a REST rate limit, the plugin shares a persistent cooldown across all lookups. It honors `Retry-After` or the primary-limit reset header, with a five-minute fallback when neither provides a reset time. When a response reports fewer than **1,000** remaining REST requests for the account, the plugin also pauses until GitHub’s reset time, leaving the rest for other tools. The row displays the retry time. GitHub CLI does not remove API limits.
+
+Manual Refresh rechecks after a **30-second** minimum shared cache while the hourly budget allows.
 
 [GitHub API best practices](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api)
 
@@ -140,10 +144,11 @@ bb plugin dev
 | `style.css` | Theme-aware row and responsive layout |
 | `model.test.ts` | Nested relationships, cycles, deduplication, and missing PRs |
 | `server.test.ts` | Absent PRs, lookup failures, and persisted stale status |
+| `cost.test.ts` | Hourly GitHub request bound for 300 threads in 20 repositories, and low-quota pause |
 
 ### Validation
 
-The current version passes TypeScript checks, 16 automated tests, and a BB plugin build. Live browser checks covered a parent with six PRs, refresh, expanded details, child navigation, light/dark themes, and a narrow viewport.
+The current version passes TypeScript checks, 18 automated tests, and a BB plugin build. Live browser checks for version 0.1.3 covered a parent with six PRs, refresh, expanded details, child navigation, light/dark themes, and a narrow viewport.
 
 When contributing, run the commands above and verify the affected behavior in BB. Keep GitHub access on the server, use public BB SDK APIs, and distinguish unavailable status from an absent PR.
 
