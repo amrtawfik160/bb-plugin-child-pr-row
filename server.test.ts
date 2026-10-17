@@ -27,7 +27,7 @@ describe('shared GitHub REST lookup', () => {
     await seed(bb, 'one', 1);
     const factory=createPlugin(transport);factory(bb);
     await harness.behavior.callRpc('lookup', { environmentId:'one' });
-    vi.setSystemTime(Date.now()+61_000);
+    vi.setSystemTime(Date.now()+121_000);
     const reloaded=await harness.lifecycle.reload(factory);
     expect(await reloaded.harness.behavior.callRpc('lookup', { environmentId:'one' })).toMatchObject({pull:{number:1},error:null});
     expect(transport.mock.calls[1][1]).toBe('"v1"');
@@ -57,8 +57,8 @@ describe('shared GitHub REST lookup', () => {
   it('finds older PRs outside the repository page by number or branch', async () => {
     const transport=vi.fn<Transport>(async endpoint=>endpoint.includes('sort=updated') ? ok([]) : ok([pr(7)]));
     const {bb,harness}=createFakePluginHost();const client=githubClient(bb,transport);
-    expect((await client.find('org/repo',null,7))?.number).toBe(7);
-    expect((await client.find('org/repo','branch-7'))?.number).toBe(7);
+    expect((await client.find('org/repo',null,7)).pull?.number).toBe(7);
+    expect((await client.find('org/repo','branch-7')).pull?.number).toBe(7);
     expect(transport.mock.calls.map(call=>call[0])).toEqual([
       'repos/org/repo/pulls?state=all&sort=updated&direction=desc&per_page=100',
       'repos/org/repo/pulls/7',
@@ -115,7 +115,7 @@ describe('manual refresh', () => {
     harness.sdk.stub('projects.get',async()=>({gitRemoteUrl:'https://github.com/org/repo.git'}));
     createPlugin(transport)(bb);
     expect(await harness.behavior.callRpc('lookup',{environmentId:'new'})).toMatchObject({pull:null,error:null});
-    created=true;vi.setSystemTime(Date.now()+61_000);
+    created=true;vi.setSystemTime(Date.now()+121_000);
     expect(await harness.behavior.callRpc('lookup',{environmentId:'new'})).toMatchObject({pull:{number:7},error:null});
     await harness.lifecycle.dispose();
   });

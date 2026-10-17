@@ -24,9 +24,11 @@ export function createPlugin(transport?: Transport) {
     const pending = new Map<string, Promise<Lookup>>();
     let queue: Promise<unknown> = Promise.resolve();
     const minute = 60_000;
+    // Merged is final and closed rarely changes, so those rows recheck less often.
     function ttl(value: Lookup) {
       if (value.error) return 5 * minute;
-      if (!value.pull) return minute;
+      if (value.pull?.state === 'merged') return 30 * minute;
+      if (value.pull?.state === 'closed') return 10 * minute;
       return minute;
     }
     async function lookup(environmentId: string, refresh = false): Promise<Lookup> {
@@ -38,9 +40,9 @@ export function createPlugin(transport?: Transport) {
       let value: Lookup;
       try {
         const identity = pullIdentity(previous.pull?.url);
-        let pull;
+        let found;
         if (identity) {
-          pull = await github.find(identity.repo, null, identity.number, refresh);
+          found = await github.find(identity.repo, null, identity.number, refresh, previous.checkedAt);
         } else {
           const environment = await bb.sdk.environments.get({ environmentId });
           const project = await bb.sdk.projects.get({ projectId: environment.projectId });
@@ -50,13 +52,18 @@ export function createPlugin(transport?: Transport) {
             await bb.storage.kv.set(`rest-attempt:${environmentId}`, { at: Date.now(), result: value });
             return value;
           }
-          pull = await github.find(repo, environment.branchName, undefined, refresh);
+          found = await github.find(repo, environment.branchName, undefined, refresh, previous.checkedAt);
         }
-        value = { pull: pull ? toPull(pull) : null, error: null, checkedAt: Date.now() };
-        if (!value.pull && previous.pull) {
-          value = { ...previous, error: 'Branch no longer resolves. Open the PR to verify its current status.' };
-        } else {
+        if (found.unchanged) {
+          value = { ...previous, error: null, checkedAt: Math.max(previous.checkedAt, found.at) };
           await bb.storage.kv.set(`pull:${environmentId}`, value);
+        } else {
+          value = { pull: found.pull ? toPull(found.pull) : null, error: null, checkedAt: found.at };
+          if (!value.pull && previous.pull) {
+            value = { ...previous, error: 'Branch no longer resolves. Open the PR to verify its current status.' };
+          } else {
+            await bb.storage.kv.set(`pull:${environmentId}`, value);
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'PR lookup failed.';
